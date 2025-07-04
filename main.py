@@ -1,17 +1,16 @@
 import os
-from telegram.ext import Updater, CommandHandler
+from telegram.ext import Application, CommandHandler
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-def start(update, context):
-    update.message.reply_text("Hello! Your bot is running on Railway.")
+async def start(update, context):
+    await update.message.reply_text("Hello! Your bot is running on Render.")
 
-def main():
-    updater = Updater(TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    updater.start_polling()
-    updater.idle()
+async def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    await application.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    import asyncio
+    asyncio.run(main()) 
