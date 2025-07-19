@@ -1,17 +1,25 @@
 import os
 import asyncio
 import threading
+import http.server
+import socketserver
 from telegram.ext import Application, CommandHandler
-from flask import Flask
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Simple Flask app for Render's port requirement
-app = Flask(__name__)
+# Simple HTTP server for Render's port requirement
+class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"Telegram Bot is running!")
 
-@app.route('/')
-def home():
-    return "Telegram Bot is running!"
+def run_http_server():
+    port = int(os.environ.get('PORT', 10000))
+    with socketserver.TCPServer(("", port), SimpleHTTPRequestHandler) as httpd:
+        print(f"Starting HTTP server on port {port}")
+        httpd.serve_forever()
 
 async def start(update, context):
     await update.message.reply_text("Hello! Your bot is running on Render.")
@@ -37,10 +45,8 @@ def main():
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Start Flask web server (required for Render)
-    port = int(os.environ.get('PORT', 10000))
-    print(f"Starting web server on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    # Start HTTP server in main thread
+    run_http_server()
 
 if __name__ == "__main__":
     main()
