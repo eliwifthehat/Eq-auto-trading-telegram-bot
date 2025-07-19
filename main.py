@@ -83,8 +83,8 @@ async def setup_webhook():
     await application.initialize()
     await application.start()
     
-    # Set webhook
-    webhook_url = "https://eliwifthehat-eq-auto-trading-telegram-bot.onrender.com/webhook"
+    # Set webhook to the new service URL
+    webhook_url = "https://eq-auto-trading-telegram-bot-1.onrender.com/webhook"
     await application.bot.set_webhook(url=webhook_url)
     print(f"Webhook set to: {webhook_url}")
 
