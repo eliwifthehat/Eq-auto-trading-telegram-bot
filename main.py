@@ -3,9 +3,15 @@ import asyncio
 import threading
 import http.server
 import socketserver
-from telegram.ext import Application, CommandHandler
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+try:
+    from telegram.ext import Application, CommandHandler
+except ImportError as e:
+    raise ImportError(
+        "The 'python-telegram-bot' package is required. Install it with 'pip install python-telegram-bot'."
+    ) from e
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # Simple HTTP server for Render's port requirement
 class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
