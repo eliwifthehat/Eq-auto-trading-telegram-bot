@@ -14,13 +14,15 @@ except ImportError as e:
         "The 'python-telegram-bot' package is required. Install it with 'pip install python-telegram-bot'."
     ) from e
 
-from wallet_manager import WalletManager
+from supabase_manager import SupabaseManager
+from balance_checker import BalanceChecker
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # Global application variable
 application = None
-wallet_manager = WalletManager()
+db_manager = SupabaseManager()
+balance_checker = BalanceChecker()
 
 # Simple HTTP server for Render's port requirement with webhook support
 class WebhookHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -72,6 +74,22 @@ def run_http_server():
 async def start(update, context):
     """Welcome message with wallet management options"""
     user_id = str(update.effective_user.id)
+    
+    # Create or get user in database
+    user = update.effective_user
+    user_result = db_manager.get_user(user_id)
+    
+    if not user_result["success"]:
+        # Create new user
+        create_result = db_manager.create_user(
+            telegram_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name
+        )
+        if not create_result["success"]:
+            await update.message.reply_text("❌ Error creating user account. Please try again.")
+            return
     
     welcome_text = """
 🤖 **Welcome to EQ Trading Bot!**
@@ -135,8 +153,8 @@ async def connect_wallet(update, context):
         )
         return
     
-    # Add wallet
-    result = wallet_manager.add_wallet(user_id, wallet_name, private_key, chain)
+    # Add wallet to database
+    result = db_manager.add_wallet(user_id, wallet_name, private_key, chain)
     
     if result["success"]:
         await update.message.reply_text(
@@ -156,7 +174,13 @@ async def connect_wallet(update, context):
 async def list_wallets(update, context):
     """List user's wallets"""
     user_id = str(update.effective_user.id)
-    wallets = wallet_manager.get_user_wallets(user_id)
+    result = db_manager.get_user_wallets(user_id)
+    
+    if not result["success"]:
+        await update.message.reply_text(f"❌ **Error:** {result['error']}", parse_mode='Markdown')
+        return
+    
+    wallets = result["wallets"]
     
     if not wallets:
         await update.message.reply_text(
@@ -191,7 +215,40 @@ async def check_balance(update, context):
     wallet_name = context.args[0]
     chain = context.args[1].lower()
     
-    result = wallet_manager.get_wallet_balance(user_id, wallet_name, chain)
+    # Get wallet from database
+    wallet_result = db_manager.get_wallet(user_id, wallet_name, chain)
+    
+    if not wallet_result["success"]:
+        await update.message.reply_text(f"❌ **Error:** {wallet_result['error']}", parse_mode='Markdown')
+        return
+    
+    wallet = wallet_result["wallet"]
+    
+    # Get real-time balance from blockchain
+    if chain.lower() == "solana":
+        balance_result = balance_checker.get_sol_balance(wallet["address"])
+        if balance_result["success"]:
+            result = {
+                "success": True,
+                "wallet_address": wallet["address"],
+                "balance_eth": balance_result["balance_sol"],
+                "balance_wei": str(balance_result["balance_lamports"]),
+                "symbol": "SOL"
+            }
+        else:
+            result = {"success": False, "error": balance_result["error"]}
+    else:
+        balance_result = balance_checker.get_eth_balance(wallet["address"], chain.lower())
+        if balance_result["success"]:
+            result = {
+                "success": True,
+                "wallet_address": wallet["address"],
+                "balance_eth": balance_result["balance_eth"],
+                "balance_wei": balance_result["balance_wei"],
+                "symbol": balance_result["symbol"]
+            }
+        else:
+            result = {"success": False, "error": balance_result["error"]}
     
     if result["success"]:
         await update.message.reply_text(
@@ -223,7 +280,7 @@ async def remove_wallet(update, context):
     wallet_name = context.args[0]
     chain = context.args[1].lower()
     
-    result = wallet_manager.remove_wallet(user_id, wallet_name, chain)
+    result = db_manager.remove_wallet(user_id, wallet_name, chain)
     
     if result["success"]:
         await update.message.reply_text(
@@ -241,11 +298,19 @@ async def remove_wallet(update, context):
 async def user_settings(update, context):
     """Show user settings"""
     user_id = str(update.effective_user.id)
-    settings = wallet_manager.get_user_settings(user_id)
+    user_result = db_manager.get_user(user_id)
+    
+    if not user_result["success"]:
+        await update.message.reply_text(f"❌ **Error:** {user_result['error']}", parse_mode='Markdown')
+        return
+    
+    user = user_result["user"]
+    settings = user.get("settings", {})
     
     settings_text = "⚙️ **Your Settings:**\n\n"
-    settings_text += f"**Default Chain:** {settings['default_chain'].capitalize()}\n"
-    settings_text += f"**Max Slippage:** {settings['max_slippage']}%\n\n"
+    settings_text += f"**Default Chain:** {settings.get('default_chain', 'ethereum').capitalize()}\n"
+    settings_text += f"**Max Slippage:** {settings.get('max_slippage', 5.0)}%\n"
+    settings_text += f"**Notifications:** {'✅' if settings.get('notifications', True) else '❌'}\n\n"
     settings_text += "Use `/setchain <chain>` or `/setslippage <percentage>` to update"
     
     await update.message.reply_text(settings_text, parse_mode='Markdown')
@@ -273,7 +338,17 @@ async def set_default_chain(update, context):
         )
         return
     
-    result = wallet_manager.update_user_settings(user_id, default_chain=chain)
+    # Get current user settings
+    user_result = db_manager.get_user(user_id)
+    if not user_result["success"]:
+        await update.message.reply_text(f"❌ **Error:** {user_result['error']}", parse_mode='Markdown')
+        return
+    
+    user = user_result["user"]
+    current_settings = user.get("settings", {})
+    current_settings["default_chain"] = chain
+    
+    result = db_manager.update_user_settings(user_id, current_settings)
     
     if result["success"]:
         await update.message.reply_text(
@@ -294,7 +369,8 @@ async def help_command(update, context):
 **🔐 Wallet Management:**
 • `/connect <name> <private_key> <chain>` - Add wallet
 • `/wallets` - View your wallets  
-• `/balance <wallet_name> <chain>` - Check balance
+• `/balance <wallet_name> <chain>` - Check native balance
+• `/token <wallet_name> <chain> <token_address>` - Check token balance
 • `/remove <wallet_name> <chain>` - Remove wallet
 
 **⚙️ Settings:**
@@ -305,6 +381,7 @@ async def help_command(update, context):
 **📊 Trading (Coming Soon):**
 • `/buy <token> <amount>` - Manual buy
 • `/sell <token> <amount>` - Manual sell
+• `/send <wallet_name> <chain> <to_address> <amount>` - Send transaction
 • `/autostart <strategy>` - Start auto trading
 
 **🔗 Supported Chains:**
@@ -312,14 +389,62 @@ async def help_command(update, context):
 • Base (ETH)
 • BSC (BNB)
 • Polygon (MATIC)
+• Solana (SOL)
 
 **💡 Tips:**
 • Keep your private keys secure
 • Start with small amounts for testing
 • Use testnet first if available
+• Real-time balance checking from blockchain
     """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def check_token_balance(update, context):
+    """Check token balance for a specific wallet"""
+    user_id = str(update.effective_user.id)
+    
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "❌ **Usage:** `/token <wallet_name> <chain> <token_address>`\n\n"
+            "**Example:** `/token mywallet ethereum 0xA0b86a33E6441b8c4C8C1C1C1C1C1C1C1C1C1C1C1`\n\n"
+            "**Supported chains:** ethereum, base, bsc, polygon",
+            parse_mode='Markdown'
+        )
+        return
+    
+    wallet_name = context.args[0]
+    chain = context.args[1].lower()
+    token_address = context.args[2]
+    
+    # Get wallet from database
+    wallet_result = db_manager.get_wallet(user_id, wallet_name, chain)
+    
+    if not wallet_result["success"]:
+        await update.message.reply_text(f"❌ **Error:** {wallet_result['error']}", parse_mode='Markdown')
+        return
+    
+    wallet = wallet_result["wallet"]
+    
+    # Get token balance
+    token_result = balance_checker.get_token_balance(wallet["address"], token_address, chain)
+    
+    if token_result["success"]:
+        await update.message.reply_text(
+            f"🪙 **Token Balance for {wallet_name}**\n\n"
+            f"**Token:** {token_result['symbol']}\n"
+            f"**Chain:** {chain.capitalize()}\n"
+            f"**Address:** `{wallet['address']}`\n"
+            f"**Token Address:** `{token_address}`\n"
+            f"**Balance:** {token_result['balance']:,.6f} {token_result['symbol']}\n"
+            f"**Raw Balance:** {token_result['balance_raw']}",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ **Failed to get token balance:** {token_result['error']}",
+            parse_mode='Markdown'
+        )
 
 async def setup_webhook():
     global application
@@ -336,6 +461,7 @@ async def setup_webhook():
     application.add_handler(CommandHandler("connect", connect_wallet))
     application.add_handler(CommandHandler("wallets", list_wallets))
     application.add_handler(CommandHandler("balance", check_balance))
+    application.add_handler(CommandHandler("token", check_token_balance))
     application.add_handler(CommandHandler("remove", remove_wallet))
     application.add_handler(CommandHandler("settings", user_settings))
     application.add_handler(CommandHandler("setchain", set_default_chain))
