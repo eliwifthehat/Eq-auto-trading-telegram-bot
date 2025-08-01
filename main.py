@@ -5,6 +5,7 @@ import http.server
 import socketserver
 import json
 from urllib.parse import parse_qs
+from datetime import datetime
 
 try:
     from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -75,21 +76,26 @@ async def start(update, context):
     """Welcome message with wallet management options"""
     user_id = str(update.effective_user.id)
     
-    # Create or get user in database
-    user = update.effective_user
-    user_result = db_manager.get_user(user_id)
-    
-    if not user_result["success"]:
-        # Create new user
-        create_result = db_manager.create_user(
-            telegram_id=user_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name
-        )
-        if not create_result["success"]:
-            await update.message.reply_text("❌ Error creating user account. Please try again.")
-            return
+    try:
+        # Create or get user in database
+        user = update.effective_user
+        user_result = db_manager.get_user(user_id)
+        
+        if not user_result["success"]:
+            # Create new user
+            create_result = db_manager.create_user(
+                telegram_id=user_id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name
+            )
+            if not create_result["success"]:
+                # Database error - show welcome anyway
+                print(f"Database error: {create_result['error']}")
+                # Continue with welcome message
+    except Exception as e:
+        print(f"Database connection error: {e}")
+        # Continue with welcome message even if database fails
     
     welcome_text = """
 🤖 **Welcome to EQ Trading Bot!**
@@ -153,52 +159,84 @@ async def connect_wallet(update, context):
         )
         return
     
-    # Add wallet to database
-    result = db_manager.add_wallet(user_id, wallet_name, private_key, chain)
-    
-    if result["success"]:
+    try:
+        # Add wallet to database
+        result = db_manager.add_wallet(user_id, wallet_name, private_key, chain)
+        
+        if result["success"]:
+            await update.message.reply_text(
+                f"✅ **Wallet Connected Successfully!**\n\n"
+                f"**Name:** {wallet_name}\n"
+                f"**Address:** `{result['wallet_address']}`\n"
+                f"**Chain:** {chain.capitalize()}\n\n"
+                f"Use `/balance {wallet_name} {chain}` to check balance",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ **Failed to connect wallet:** {result['error']}\n\n"
+                f"**Note:** Database connection issue. Please try again later.",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
         await update.message.reply_text(
-            f"✅ **Wallet Connected Successfully!**\n\n"
-            f"**Name:** {wallet_name}\n"
-            f"**Address:** `{result['wallet_address']}`\n"
-            f"**Chain:** {chain.capitalize()}\n\n"
-            f"Use `/balance {wallet_name} {chain}` to check balance",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ **Failed to connect wallet:** {result['error']}",
+            f"❌ **Database Error:** Unable to connect wallet at this time.\n\n"
+            f"**Error:** {str(e)}\n\n"
+            f"Please try again later or contact support.",
             parse_mode='Markdown'
         )
 
 async def list_wallets(update, context):
     """List user's wallets"""
     user_id = str(update.effective_user.id)
-    result = db_manager.get_user_wallets(user_id)
     
-    if not result["success"]:
-        await update.message.reply_text(f"❌ **Error:** {result['error']}", parse_mode='Markdown')
-        return
-    
-    wallets = result["wallets"]
-    
-    if not wallets:
+    try:
+        result = db_manager.get_user_wallets(user_id)
+        
+        if not result["success"]:
+            await update.message.reply_text(
+                f"❌ **Database Error:** {result['error']}\n\n"
+                f"Please try again later.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        wallets = result["wallets"]
+        
+        if not wallets:
+            await update.message.reply_text(
+                "📭 **No wallets connected**\n\n"
+                "Use `/connect <name> <private_key> <chain>` to add your first wallet",
+                parse_mode='Markdown'
+            )
+            return
+        
+        wallet_text = "🔐 **Your Wallets:**\n\n"
+        for i, wallet in enumerate(wallets, 1):
+            wallet_text += f"{i}. **{wallet['name']}** ({wallet['chain'].capitalize()})\n"
+            wallet_text += f"   Address: `{wallet['address']}`\n"
+            wallet_text += f"   Added: {wallet['created_at']}\n\n"
+        
+        wallet_text += "Use `/balance <wallet_name> <chain>` to check balance"
+        
+        await update.message.reply_text(wallet_text, parse_mode='Markdown')
+        
+    except Exception as e:
         await update.message.reply_text(
-            "📭 **No wallets connected**\n\n"
-            "Use `/connect <name> <private_key> <chain>` to add your first wallet",
+            f"❌ **Database Error:** Unable to list wallets at this time.\n\n"
+            f"**Error:** {str(e)}\n\n"
+            f"Please try again later.",
             parse_mode='Markdown'
         )
-        return
-    
-    wallet_text = "🔐 **Your Wallets:**\n\n"
-    for i, wallet in enumerate(wallets, 1):
-        wallet_text += f"{i}. **{wallet['name']}** ({wallet['chain'].capitalize()})\n"
-        wallet_text += f"   Address: `{wallet['address']}`\n"
-        wallet_text += f"   Added: {wallet['created_at']}\n\n"
-    
-    wallet_text += "Use `/balance <wallet_name> <chain>` to check balance"
-    
-    await update.message.reply_text(wallet_text, parse_mode='Markdown')
+
+async def test_command(update, context):
+    """Simple test command to verify bot is working"""
+    await update.message.reply_text(
+        "✅ **Bot is working!**\n\n"
+        "**Status:** Online and responding\n"
+        "**Time:** " + datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        parse_mode='Markdown'
+    )
 
 async def check_balance(update, context):
     """Check wallet balance"""
@@ -366,6 +404,11 @@ async def help_command(update, context):
     help_text = """
 ❓ **EQ Trading Bot Help**
 
+**🔧 Basic Commands:**
+• `/start` - Welcome message
+• `/test` - Test if bot is working
+• `/help` - Show this help
+
 **🔐 Wallet Management:**
 • `/connect <name> <private_key> <chain>` - Add wallet
 • `/wallets` - View your wallets  
@@ -466,6 +509,7 @@ async def setup_webhook():
     application.add_handler(CommandHandler("settings", user_settings))
     application.add_handler(CommandHandler("setchain", set_default_chain))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("test", test_command))
     
     print("Bot is starting...")
     await application.initialize()
