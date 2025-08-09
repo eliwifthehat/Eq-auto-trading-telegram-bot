@@ -18,6 +18,8 @@ except ImportError as e:
 from supabase_manager import SupabaseManager
 from balance_checker import BalanceChecker
 from transaction_manager import TransactionManager
+from eth_account import Account
+import secrets
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
@@ -92,6 +94,74 @@ def run_http_server():
         print(f"Starting HTTP server on port {port}")
         httpd.serve_forever()
 
+def generate_wallet_for_chain(chain: str) -> dict:
+    """Generate a new wallet for the specified chain"""
+    try:
+        if chain.lower() in ['ethereum', 'base', 'bsc', 'polygon']:
+            # Generate EVM wallet
+            private_key = secrets.token_hex(32)
+            account = Account.from_key(private_key)
+            return {
+                "success": True,
+                "private_key": private_key,
+                "address": account.address,
+                "chain": chain.lower()
+            }
+        elif chain.lower() == 'solana':
+            # For now, return placeholder for Solana (would need solana-py keypair generation)
+            return {
+                "success": False,
+                "error": "Solana wallet generation not yet implemented"
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Unsupported chain: {chain}"
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+async def auto_generate_wallets(user_id: str) -> dict:
+    """Auto-generate wallets for all supported chains"""
+    chains = ['ethereum', 'base', 'bsc', 'polygon']
+    results = []
+    
+    for chain in chains:
+        wallet_gen = generate_wallet_for_chain(chain)
+        if wallet_gen["success"]:
+            # Add wallet to database
+            wallet_result = db_manager.add_wallet(
+                telegram_id=user_id,
+                name=f"auto_{chain}",
+                address=wallet_gen["address"],
+                private_key=wallet_gen["private_key"],
+                chain=chain
+            )
+            
+            if wallet_result["success"]:
+                results.append({
+                    "chain": chain,
+                    "address": wallet_gen["address"],
+                    "status": "created"
+                })
+            else:
+                results.append({
+                    "chain": chain,
+                    "status": "failed",
+                    "error": wallet_result["error"]
+                })
+        else:
+            results.append({
+                "chain": chain,
+                "status": "failed", 
+                "error": wallet_gen["error"]
+            })
+    
+    return {"success": True, "wallets": results}
+
 # Bot command handlers
 async def start(update, context):
     """Welcome message with wallet management options"""
@@ -123,7 +193,8 @@ async def start(update, context):
 
 **Available Commands:**
 🔐 **Wallet Management:**
-• `/connect <name> <private_key> <chain>` - Add wallet
+• `/generate` - Auto-generate fresh wallets for all chains
+• `/connect <name> <private_key> <chain>` - Add existing wallet
 • `/wallets` - View your wallets
 • `/balance <wallet_name> <chain>` - Check balance
 • `/remove <wallet_name> <chain>` - Remove wallet
@@ -158,6 +229,70 @@ async def start(update, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def generate_wallets_command(update, context):
+    """Generate fresh wallets for all supported chains"""
+    user_id = str(update.effective_user.id)
+    
+    try:
+        # Check if user exists, create if not
+        user_result = db_manager.get_user(user_id)
+        if not user_result["success"]:
+            user = update.effective_user
+            create_result = db_manager.create_user(
+                telegram_id=user_id, username=user.username, 
+                first_name=user.first_name, last_name=user.last_name
+            )
+            if not create_result["success"]:
+                await update.message.reply_text(
+                    f"❌ **Error creating user account:** {create_result['error']}",
+                    parse_mode='Markdown'
+                )
+                return
+        
+        await update.message.reply_text(
+            "🔄 **Generating fresh wallets for all chains...**\n\n"
+            "This will create new wallets for:\n"
+            "• Ethereum (ETH)\n"
+            "• Base (ETH)\n" 
+            "• BSC (BNB)\n"
+            "• Polygon (MATIC)\n\n"
+            "⏳ Please wait...",
+            parse_mode='Markdown'
+        )
+        
+        # Generate wallets
+        result = await auto_generate_wallets(user_id)
+        
+        if result["success"]:
+            wallet_text = "✅ **Wallets Generated Successfully!**\n\n"
+            
+            for wallet in result["wallets"]:
+                if wallet["status"] == "created":
+                    wallet_text += f"🔗 **{wallet['chain'].upper()}**\n"
+                    wallet_text += f"Address: `{wallet['address']}`\n\n"
+                else:
+                    wallet_text += f"❌ **{wallet['chain'].upper()}:** {wallet['error']}\n\n"
+            
+            wallet_text += "💡 **Important:**\n"
+            wallet_text += "• These are fresh wallets with 0 balance\n"
+            wallet_text += "• Send funds to these addresses to start trading\n"
+            wallet_text += "• Use `/balance auto_<chain> <chain>` to check balances\n"
+            wallet_text += "• Use `/deposit auto_<chain> <chain>` for deposit info"
+            
+            await update.message.reply_text(wallet_text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(
+                "❌ **Failed to generate wallets.** Please try again later.",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **Error:** Unable to generate wallets.\n\n"
+            f"**Error:** {str(e)}",
+            parse_mode='Markdown'
+        )
 
 async def connect_wallet(update, context):
     """Connect a new wallet"""
@@ -437,7 +572,8 @@ async def help_command(update, context):
 • `/help` - Show this help
 
 **🔐 Wallet Management:**
-• `/connect <name> <private_key> <chain>` - Add wallet
+• `/generate` - Auto-generate fresh wallets for all chains
+• `/connect <name> <private_key> <chain>` - Add existing wallet
 • `/wallets` - View your wallets  
 • `/balance <wallet_name> <chain>` - Check native balance
 • `/token <wallet_name> <chain> <token_address>` - Check token balance
@@ -759,6 +895,7 @@ def setup_application():
     
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("generate", generate_wallets_command))
     application.add_handler(CommandHandler("connect", connect_wallet))
     application.add_handler(CommandHandler("wallets", list_wallets))
     application.add_handler(CommandHandler("balance", check_balance))
