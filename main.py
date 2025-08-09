@@ -46,8 +46,15 @@ class WebhookHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             
             try:
                 update_data = json.loads(post_data.decode('utf-8'))
-                # Process the update asynchronously
-                asyncio.run(self.process_update(update_data))
+                
+                # Process update in a new thread with proper event loop
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self.process_update_sync, update_data)
+                    try:
+                        future.result(timeout=30)  # 30 second timeout
+                    except concurrent.futures.TimeoutError:
+                        print("Webhook processing timed out")
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -61,11 +68,23 @@ class WebhookHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
     
-    async def process_update(self, update_data):
-        global application
-        if application:
-            update = Update.de_json(update_data, application.bot)
-            await application.process_update(update)
+    def process_update_sync(self, update_data):
+        """Process update in a synchronous context with new event loop"""
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def process():
+                global application
+                if application:
+                    update = Update.de_json(update_data, application.bot)
+                    await application.process_update(update)
+            
+            loop.run_until_complete(process())
+            loop.close()
+        except Exception as e:
+            print(f"Error in process_update_sync: {e}")
 
 def run_http_server():
     port = int(os.environ.get('PORT', 10000))
@@ -727,11 +746,12 @@ async def estimate_gas(update, context):
             parse_mode='Markdown'
         )
 
-async def setup_webhook():
+def setup_application():
+    """Setup the application with all handlers"""
     global application
     if not TELEGRAM_TOKEN:
         print("Error: TELEGRAM_TOKEN environment variable not set")
-        return
+        return None
     
     print(f"Starting bot with token: {TELEGRAM_TOKEN[:10]}...")
     
@@ -753,6 +773,16 @@ async def setup_webhook():
     application.add_handler(CommandHandler("status", check_transaction_status))
     application.add_handler(CommandHandler("gas", estimate_gas))
     
+    return application
+
+async def setup_webhook():
+    """Setup webhook in proper async context"""
+    global application
+    
+    application = setup_application()
+    if not application:
+        return
+    
     print("Bot is starting...")
     await application.initialize()
     await application.start()
@@ -761,12 +791,27 @@ async def setup_webhook():
     webhook_url = "https://eq-auto-trading-telegram-bot-1.onrender.com/webhook"
     await application.bot.set_webhook(url=webhook_url)
     print(f"Webhook set to: {webhook_url}")
+    
+    # Keep the event loop running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("Shutting down bot...")
+        await application.stop()
 
 def main():
-    # Start bot setup in background thread
-    bot_thread = threading.Thread(target=lambda: asyncio.run(setup_webhook()))
+    # Start bot setup in background thread with proper event loop
+    def run_bot():
+        asyncio.run(setup_webhook())
+    
+    bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
+    
+    # Give the bot time to start
+    import time
+    time.sleep(3)
     
     # Start HTTP server in main thread
     run_http_server()
