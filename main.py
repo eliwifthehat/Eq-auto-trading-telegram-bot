@@ -20,14 +20,35 @@ from balance_checker import BalanceChecker
 from transaction_manager import TransactionManager
 from eth_account import Account
 import secrets
+import asyncio
+from functools import wraps
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # Global application variable
 application = None
-db_manager = SupabaseManager()
-balance_checker = BalanceChecker()
-transaction_manager = TransactionManager()
+
+# Initialize managers with error handling
+try:
+    db_manager = SupabaseManager()
+    print("✅ Database manager initialized")
+except Exception as e:
+    print(f"❌ Database manager failed: {e}")
+    db_manager = None
+
+try:
+    balance_checker = BalanceChecker()
+    print("✅ Balance checker initialized")
+except Exception as e:
+    print(f"❌ Balance checker failed: {e}")
+    balance_checker = None
+
+try:
+    transaction_manager = TransactionManager()
+    print("✅ Transaction manager initialized")
+except Exception as e:
+    print(f"❌ Transaction manager failed: {e}")
+    transaction_manager = None
 
 # Simple HTTP server for Render's port requirement with webhook support
 class WebhookHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -93,6 +114,27 @@ def run_http_server():
     with socketserver.TCPServer(("", port), WebhookHTTPRequestHandler) as httpd:
         print(f"Starting HTTP server on port {port}")
         httpd.serve_forever()
+
+def sync_db_operation(func):
+    """Decorator to handle database operations in sync context"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Try to run in current event loop
+            return func(*args, **kwargs)
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                # Create new event loop for this operation
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    loop.close()
+            else:
+                raise e
+    return wrapper
 
 def generate_wallet_for_chain(chain: str) -> dict:
     """Generate a new wallet for the specified chain"""
@@ -234,6 +276,14 @@ async def generate_wallets_command(update, context):
     """Generate fresh wallets for all supported chains"""
     user_id = str(update.effective_user.id)
     
+    if not db_manager:
+        await update.message.reply_text(
+            "❌ **Database service is temporarily unavailable.**\n\n"
+            "Please try again in a few moments.",
+            parse_mode='Markdown'
+        )
+        return
+    
     try:
         # Check if user exists, create if not
         user_result = db_manager.get_user(user_id)
@@ -352,6 +402,14 @@ async def list_wallets(update, context):
     """List user's wallets"""
     user_id = str(update.effective_user.id)
     
+    if not db_manager:
+        await update.message.reply_text(
+            "❌ **Database service is temporarily unavailable.**\n\n"
+            "Please try again in a few moments.",
+            parse_mode='Markdown'
+        )
+        return
+    
     try:
         result = db_manager.get_user_wallets(user_id)
         
@@ -367,8 +425,10 @@ async def list_wallets(update, context):
         
         if not wallets:
             await update.message.reply_text(
-                "📭 **No wallets connected**\n\n"
-                "Use `/connect <name> <private_key> <chain>` to add your first wallet",
+                "📭 **No wallets found**\n\n"
+                "💡 **Get started:**\n"
+                "• `/generate` - Auto-create wallets for all chains\n"
+                "• `/connect <name> <private_key> <chain>` - Add existing wallet",
                 parse_mode='Markdown'
             )
             return
@@ -379,15 +439,20 @@ async def list_wallets(update, context):
             wallet_text += f"   Address: `{wallet['address']}`\n"
             wallet_text += f"   Added: {wallet['created_at']}\n\n"
         
-        wallet_text += "Use `/balance <wallet_name> <chain>` to check balance"
+        wallet_text += "💡 **Commands:**\n"
+        wallet_text += "• `/balance <wallet_name> <chain>` - Check balance\n"
+        wallet_text += "• `/deposit <wallet_name> <chain>` - Get deposit address"
         
         await update.message.reply_text(wallet_text, parse_mode='Markdown')
         
     except Exception as e:
         await update.message.reply_text(
-            f"❌ **Database Error:** Unable to list wallets at this time.\n\n"
-            f"**Error:** {str(e)}\n\n"
-            f"Please try again later.",
+            f"❌ **Database connection issue.**\n\n"
+            f"**Technical details:** {str(e)}\n\n"
+            f"**Solutions:**\n"
+            f"• Wait 30 seconds and try again\n"
+            f"• Try `/test` to check if bot is responding\n"
+            f"• Contact support if issue persists",
             parse_mode='Markdown'
         )
 
