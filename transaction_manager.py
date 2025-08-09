@@ -3,8 +3,14 @@ from typing import Dict, List, Optional
 from web3 import Web3
 from eth_account import Account
 from solana.rpc.api import Client as SolanaClient
-from solana.transaction import Transaction
-from solana.system_program import TransferParams, transfer
+try:
+    from solana.transaction import Transaction
+    from solana.system_program import TransferParams, transfer
+except ImportError:
+    # Fallback for different solana package versions
+    Transaction = None
+    TransferParams = None
+    transfer = None
 import requests
 
 class TransactionManager:
@@ -26,7 +32,11 @@ class TransactionManager:
                 print(f"Failed to connect to {chain}: {e}")
         
         # Initialize Solana client
-        self.solana_client = SolanaClient(os.environ.get('SOLANA_RPC', 'https://api.mainnet-beta.solana.com'))
+        try:
+            self.solana_client = SolanaClient(os.environ.get('SOLANA_RPC', 'https://api.mainnet-beta.solana.com'))
+        except Exception as e:
+            print(f"Failed to initialize Solana client: {e}")
+            self.solana_client = None
     
     def get_deposit_address(self, wallet_address: str, chain: str) -> Dict:
         """Get deposit address for a wallet (same as wallet address for now)"""
@@ -118,6 +128,13 @@ class TransactionManager:
     def send_sol(self, from_private_key: str, to_address: str, amount: float) -> Dict:
         """Send SOL tokens"""
         try:
+            # Check if Solana transaction modules are available
+            if not all([Transaction, TransferParams, transfer]):
+                return {
+                    "success": False, 
+                    "error": "Solana transaction functionality not available. Please check solana package installation."
+                }
+            
             # Convert SOL to lamports
             amount_lamports = int(amount * 10**9)
             
@@ -300,6 +317,8 @@ class TransactionManager:
         """Get transaction status and details"""
         try:
             if chain == "solana":
+                if not self.solana_client:
+                    return {"success": False, "error": "Solana client not available"}
                 result = self.solana_client.get_transaction(tx_hash)
                 if result.get('result'):
                     tx_data = result['result']
